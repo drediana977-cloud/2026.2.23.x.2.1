@@ -122,6 +122,58 @@
             pointer-events: none;
             z-index: 9999;
         }
+        /* ── Jack 彩蛋覆盖层 ── */
+        #jack-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: #000;
+            z-index: 99999;
+            overflow: hidden;
+            pointer-events: all;
+        }
+        #jack-overlay.active { display: block; }
+
+        .jack-char {
+            position: absolute;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            color: var(--error);
+            animation: jackFlicker 0.08s infinite alternate;
+            pointer-events: none;
+        }
+        @keyframes jackFlicker {
+            0%   { opacity: 1;   color: #ff4455; }
+            25%  { opacity: 0.3; color: #ff0000; }
+            50%  { opacity: 0.8; color: #ff6677; }
+            75%  { opacity: 0.1; color: #cc0011; }
+            100% { opacity: 0.9; color: #ff4455; }
+        }
+
+        #jack-img-modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.92);
+            z-index: 100000;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 16px;
+        }
+        #jack-img-modal.active { display: flex; }
+        #jack-img-modal img {
+            max-width: 80vw;
+            max-height: 70vh;
+            border: 2px solid var(--error);
+            box-shadow: 0 0 40px rgba(255,68,85,0.6);
+        }
+        #jack-img-modal .jack-modal-tip {
+            color: #ff4455;
+            font-family: 'Courier New', monospace;
+            font-size: 0.8rem;
+            opacity: 0.7;
+        }
 
         /* matrix canvas */
         #matrix-canvas {
@@ -151,6 +203,16 @@
 </div>
 
 <canvas id="matrix-canvas"></canvas>
+
+<!-- Jack 彩蛋覆盖层 -->
+<div id="jack-overlay"></div>
+
+<!-- Jack 图片弹窗 -->
+<div id="jack-img-modal">
+    <img id="jack-modal-img" src="" alt="jack" />
+    <span class="jack-modal-tip">[ 正在下载 jack.png1... ]</span>
+</div>
+
 
 <script>
 /* ──────────────────────────────────────────────
@@ -257,6 +319,13 @@ function exec(raw) {
         setTimeout(() => { window.location.href = 'jack.html'; }, 900);
         return;
     }
+
+    /* ★★ 隐藏彩蛋：/jack ??/d/n ★★ */
+    if (raw === '/jack ??/d/n') {
+        triggerJackEgg();
+        return;
+    }
+
 
     const parts = raw.trim().split(/\s+/);
     const cmd   = parts[0].toLowerCase();
@@ -682,6 +751,134 @@ function startMatrix() {
     draw();
 
     canvas.addEventListener('click', stopMatrix, { once: true });
+}
+/* ──────────────────────────────────────────────
+   Jack 彩蛋
+   ────────────────────────────────────────────── */
+   function triggerJackEgg() {
+    inp.disabled = true;
+
+    const overlay = document.getElementById('jack-overlay');
+    overlay.innerHTML = '';
+    overlay.classList.add('active');
+
+    /* 生成满屏闪烁乱码，夹杂 Jack 字样 */
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const FONT_SIZE = 18;
+    const cols = Math.floor(W / (FONT_SIZE * 0.65));
+    const rows = Math.floor(H / (FONT_SIZE * 1.4));
+
+    const NOISE  = '█▓▒░▌▐▄▀■□▪▫◆◇○●※§¶†‡ΔΩΨΦαβγδεζηθ0123456789#@$%^&*!?><~`';
+    const JACK   = ['J','A','C','K'];
+
+    function spawnChars() {
+        overlay.innerHTML = '';
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const span = document.createElement('span');
+                span.className = 'jack-char';
+
+                /* 随机散布 JACK 字样 */
+                const isJack = Math.random() < 0.07;
+                span.textContent = isJack
+                    ? JACK[Math.floor(Math.random() * 4)]
+                    : NOISE[Math.floor(Math.random() * NOISE.length)];
+
+                span.style.left     = (c * FONT_SIZE * 0.65) + 'px';
+                span.style.top      = (r * FONT_SIZE * 1.4)  + 'px';
+                span.style.fontSize = FONT_SIZE + 'px';
+                /* 每个字符独立随机延迟，造成不规则闪烁 */
+                span.style.animationDelay    = (Math.random() * 0.16) + 's';
+                span.style.animationDuration = (0.06 + Math.random() * 0.1) + 's';
+
+                overlay.appendChild(span);
+            }
+        }
+    }
+
+    /* 持续刷新乱码，每 120ms 重排一次，持续 3000ms */
+    spawnChars();
+    const refreshTimer = setInterval(spawnChars, 120);
+
+    setTimeout(() => {
+        clearInterval(refreshTimer);
+        overlay.classList.remove('active');
+        overlay.innerHTML = '';
+
+        /* 生成并展示 jack.png1 */
+        showJackImage();
+    }, 3000);
+}
+
+function showJackImage() {
+    /* 用 Canvas 动态生成 jack.png1 图片内容 */
+    const cv  = document.createElement('canvas');
+    cv.width  = 480;
+    cv.height = 320;
+    const ctx = cv.getContext('2d');
+
+    /* 背景 */
+    ctx.fillStyle = '#0c0c0c';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+
+    /* 边框 */
+    ctx.strokeStyle = '#ff4455';
+    ctx.lineWidth   = 3;
+    ctx.strokeRect(10, 10, cv.width - 20, cv.height - 20);
+
+    /* 内侧装饰线 */
+    ctx.strokeStyle = '#ff444422';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(18, 18, cv.width - 36, cv.height - 36);
+
+    /* 大标题 JACK */
+    ctx.font        = 'bold 96px Courier New, monospace';
+    ctx.fillStyle   = '#ff4455';
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'middle';
+    /* 发光效果：多层阴影 */
+    ctx.shadowColor  = '#ff4455';
+    ctx.shadowBlur   = 32;
+    ctx.fillText('JACK', cv.width / 2, cv.height / 2 - 24);
+
+    /* 副标题 */
+    ctx.font        = '18px Courier New, monospace';
+    ctx.fillStyle   = '#ffb000';
+    ctx.shadowBlur  = 8;
+    ctx.shadowColor = '#ffb000';
+    ctx.fillText('??/d/n  —  You found it.', cv.width / 2, cv.height / 2 + 62);
+
+    /* 底部小字 */
+    ctx.font       = '11px Courier New, monospace';
+    ctx.fillStyle  = '#3a5c3a';
+    ctx.shadowBlur = 0;
+    ctx.fillText('TERM v1.0.0  //  hidden egg', cv.width / 2, cv.height - 28);
+
+    const dataURL = cv.toDataURL('image/png');
+
+    /* 展示弹窗 */
+    const modal = document.getElementById('jack-img-modal');
+    const img   = document.getElementById('jack-modal-img');
+    img.src     = dataURL;
+    modal.classList.add('active');
+
+    /* 自动触发下载 */
+    const a      = document.createElement('a');
+    a.href       = dataURL;
+    a.download   = 'jack.png1';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    /* 弹窗 4 秒后自动关闭 */
+    setTimeout(() => {
+        modal.classList.remove('active');
+        img.src = '';
+        inp.disabled = false;
+        inp.focus();
+        addLine('[jack.png1 已下载]', 'dim');
+    }, 4000);
 }
 
 function stopMatrix() {
