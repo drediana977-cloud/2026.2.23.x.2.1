@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TERM v1.0 — Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --green:   #00ff41;
+            --dim:     #3a5c3a;
+            --bg:      #0c0c0c;
+            --amber:   #ffb000;
+            --info:    #4af0ff;
+            --error:   #ff4455;
+            --warn:    #ffd700;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--green);
+            font-family: 'Courier New', 'Lucida Console', 'Consolas', monospace;
+            display: flex;
+            flex-direction: column;
+            user-select: text;
+        }
+
+        /* 顶部标题栏 */
+        .titlebar {
+            flex-shrink: 0;
+            background: #181818;
+            border-bottom: 1px solid #282828;
+            padding: 8px 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .dot { width: 13px; height: 13px; border-radius: 50%; }
+        .dot.r { background: #ff5f57; }
+        .dot.y { background: #febc2e; }
+        .dot.g { background: #28c840; }
+        .titlebar-name {
+            flex: 1;
+            text-align: center;
+            font-size: 0.78rem;
+            color: #555;
+            letter-spacing: 0.08em;
+        }
+
+        /* 输出区 */
+        #out {
+            flex: 1;
+            overflow-y: auto;
+            padding: 14px 22px 6px;
+            font-size: 0.88rem;
+            line-height: 1.65;
+        }
+        #out::-webkit-scrollbar { width: 3px; }
+        #out::-webkit-scrollbar-track { background: transparent; }
+        #out::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+
+        /* 输出行样式 */
+        .ln { display: block; white-space: pre-wrap; word-break: break-all; }
+        .ln.cmd    { color: var(--green); }
+        .ln.out    { color: #c8c8c8; }
+        .ln.info   { color: var(--info); }
+        .ln.ok     { color: var(--green); }
+        .ln.err    { color: var(--error); }
+        .ln.warn   { color: var(--warn); }
+        .ln.dim    { color: #444; }
+        .ln.gold   { color: var(--amber); }
+        .ln.blank  { height: 0.7em; }
+        .hl-c  { color: var(--warn); }
+        .hl-a  { color: var(--info); }
+        .hl-n  { color: #777; font-style: italic; }
+
+        /* 输入栏 */
+        .input-row {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            padding: 8px 22px 14px;
+            border-top: 1px solid #1c1c1c;
+            gap: 6px;
+        }
+        .prompt {
+            color: var(--green);
+            font-size: 0.88rem;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        #inp {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--green);
+            font-family: inherit;
+            font-size: 0.88rem;
+            caret-color: var(--green);
+        }
+        #inp::selection { background: rgba(0,255,65,0.2); }
+
+        /* CRT 扫描线 */
+        body::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent 0px,
+                transparent 2px,
+                rgba(0,0,0,0.04) 2px,
+                rgba(0,0,0,0.04) 4px
+            );
+            pointer-events: none;
+            z-index: 9999;
+        }
+
+        /* matrix canvas */
+        #matrix-canvas {
+            position: fixed;
+            inset: 0;
+            z-index: 9998;
+            cursor: pointer;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="titlebar">
+    <div class="dot r"></div>
+    <div class="dot y"></div>
+    <div class="dot g"></div>
+    <span class="titlebar-name">user@localhost: ~ — bash — 80×24</span>
+</div>
+
+<div id="out"></div>
+
+<div class="input-row">
+    <span class="prompt" id="prompt">user@localhost:~$&nbsp;</span>
+    <input id="inp" type="text" autocomplete="off" autocorrect="off"
+           autocapitalize="off" spellcheck="false" disabled />
+</div>
+
+<canvas id="matrix-canvas"></canvas>
+
+<script>
+/* ──────────────────────────────────────────────
+   核心工具函数
+   ────────────────────────────────────────────── */
+const out  = document.getElementById('out');
+const inp  = document.getElementById('inp');
+const canvas = document.getElementById('matrix-canvas');
+
+let cmdHistory = [];
+let hIdx = -1;
+let pingActive = false;
+
+document.addEventListener('click', () => { if (!inp.disabled) inp.focus(); });
+
+function scroll() { out.scrollTop = out.scrollHeight; }
+
+function addLine(text, cls = 'out', html = false) {
+    const s = document.createElement('span');
+    s.className = 'ln ' + cls;
+    html ? (s.innerHTML = text) : (s.textContent = text);
+    out.appendChild(s);
+    scroll();
+    return s;
+}
+
+function blank() { addLine('', 'blank'); }
+
+/* 逐行队列输出（用于启动序列） */
+function printQueue(lines, i, done) {
+    if (i >= lines.length) { if (done) done(); return; }
+    const { t, c, h, d } = lines[i];
+    addLine(t, c || 'out', !!h);
+    setTimeout(() => printQueue(lines, i + 1, done), d || 28);
+}
+
+/* ──────────────────────────────────────────────
+   启动序列
+   ────────────────────────────────────────────── */
+const bootSeq = [
+    { t: 'SeaBIOS (version 1.14.0)', c: 'dim', d: 30 },
+    { t: 'Machine UUID: 4a3f-8c21-de09-7755', c: 'dim', d: 25 },
+    { t: '[    0.000000] Booting Linux...', c: 'dim', d: 20 },
+    { t: '[    0.187331] Initializing cgroup subsys cpuset', c: 'dim', d: 10 },
+    { t: '[    0.391024] ACPI: PCI Root Bridge [PCI0]', c: 'dim', d: 10 },
+    { t: '[    0.882114] NET: Registered PF_INET protocol family', c: 'dim', d: 10 },
+    { t: '[    1.204451] Mounting root filesystem... OK', c: 'dim', d: 14 },
+    { t: '[    1.776023] systemd[1]: Starting system services...', c: 'dim', d: 14 },
+    { t: '[    2.103344] Started OpenBSD Secure Shell server', c: 'dim', d: 12 },
+    { t: '[    2.441019] Network interface eth0: UP (100Mbps)', c: 'dim', d: 12 },
+    { t: '[    2.801000] Boot complete.', c: 'dim', d: 20 },
+    { t: '', c: 'blank', d: 60 },
+    { t: '  ████████╗███████╗██████╗ ███╗   ███╗', c: 'ok', d: 6 },
+    { t: '  ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║', c: 'ok', d: 6 },
+    { t: '     ██║   █████╗  ██████╔╝██╔████╔██║', c: 'ok', d: 6 },
+    { t: '     ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║', c: 'ok', d: 6 },
+    { t: '     ██║   ███████╗██║  ██║██║ ╚═╝ ██║', c: 'ok', d: 6 },
+    { t: '     ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝', c: 'ok', d: 6 },
+    { t: '', c: 'blank', d: 40 },
+    { t: '  TERM v1.0.0  —  Interactive Terminal Simulator', c: 'info', d: 18 },
+    { t: '  输入 /help 获取命令列表。', c: 'out', d: 18 },
+    { t: '', c: 'blank', d: 40 },
+];
+
+printQueue(bootSeq, 0, () => {
+    inp.disabled = false;
+    inp.focus();
+});
+
+/* ──────────────────────────────────────────────
+   命令处理
+   ────────────────────────────────────────────── */
+inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+        const v = inp.value.trim();
+        inp.value = '';
+        hIdx = -1;
+        if (v) {
+            cmdHistory.unshift(v);
+            exec(v);
+        }
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (hIdx < cmdHistory.length - 1) inp.value = cmdHistory[++hIdx];
+    } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        hIdx > 0 ? (inp.value = cmdHistory[--hIdx]) : (hIdx = -1, inp.value = '');
+    }
+});
+
+/* ──────────────────────────────────────────────
+   命令路由
+   ────────────────────────────────────────────── */
+function exec(raw) {
+    if (pingActive) return;
+
+    // 回显输入行
+    addLine('user@localhost:~$ ' + raw, 'cmd');
+
+    /* ★ 隐藏命令 —— 不出现在 /help，不做提示 */
+    if (raw === '/Jack' || raw === '/jack') {
+        addLine('', 'blank');
+        addLine('正在跳转...', 'info');
+        setTimeout(() => { window.location.href = 'jack.html'; }, 900);
+        return;
+    }
+
+    const parts = raw.trim().split(/\s+/);
+    const cmd   = parts[0].toLowerCase();
+    const args  = parts.slice(1);
+
+    switch (cmd) {
+
+        /* ── /help ── */
+        case '/help':
+            blank();
+            addLine('<span class="hl-c">可用命令列表</span>', 'info', true);
+            addLine('─'.repeat(48), 'dim');
+            [
+                ['/help',           '显示此帮助页面'],
+                ['/about',          '关于此终端模拟器'],
+                ['/clear',          '清空屏幕（不清除历史）'],
+                ['/ls',             '列出当前目录文件'],
+                ['/pwd',            '显示当前工作目录路径'],
+                ['/date',           '显示当前日期与时间'],
+                ['/whoami',         '显示当前用户信息'],
+                ['/echo [文本]',    '将输入文本原样输出'],
+                ['/history',        '查看本次会话命令历史'],
+                ['/man [命令]',     '查看命令的使用手册'],
+                ['/cat [文件名]',   '输出模拟文件内容'],
+                ['/ping [地址]',    '模拟 ping 网络连通测试'],
+                ['/sysinfo',        '显示当前系统信息'],
+                ['/color [主题]',   '切换终端配色方案'],
+                ['/matrix',         '触发特殊显示效果（点击退出）'],
+            ].forEach(([c, d]) => {
+                addLine(
+                    `<span class="hl-c">${c.padEnd(22)}</span><span class="hl-n">${d}</span>`,
+                    'out', true
+                );
+            });
+            addLine('─'.repeat(48), 'dim');
+            addLine('<span class="hl-n">所有命令以 / 开头，命令区分大小写</span>', 'out', true);
+            blank();
+            break;
+
+        /* ── /about ── */
+        case '/about':
+            blank();
+            addLine('TERM v1.0.0 — 教育用交互式终端模拟器', 'info');
+            addLine('─'.repeat(44), 'dim');
+            addLine('本终端模拟真实 Unix/Linux 命令行环境的基础操作，', 'out');
+            addLine('帮助初学者在安全沙盒中熟悉命令行基础知识。', 'out');
+            blank();
+            addLine('• 所有操作均在浏览器本地运行，不连接任何服务器', 'out');
+            addLine('• 输入 /man [命令名] 可查看该命令的详细说明', 'out');
+            addLine('• 方向键 ↑↓ 可切换历史命令', 'out');
+            blank();
+            break;
+
+        /* ── /clear ── */
+        case '/clear':
+            out.innerHTML = '';
+            break;
+
+        /* ── /ls ── */
+        case '/ls':
+            blank();
+            addLine('总用量 32', 'out');
+            [
+                ['drwxr-xr-x', 'user', 'user', '4096', 'Jan 01 00:00', '.'],
+                ['drwxr-xr-x', 'root', 'root', '4096', 'Jan 01 00:00', '..'],
+                ['-rw-r--r--', 'user', 'user', ' 512', 'Jan 01 00:01', 'readme.txt'],
+                ['-rw-r--r--', 'user', 'user', ' 348', 'Jan 01 00:01', 'notes.txt'],
+                ['-rw-r--r--', 'user', 'user', '1024', 'Jan 01 00:02', 'system.log'],
+                ['drwxr-xr-x', 'user', 'user', '4096', 'Jan 01 00:00', 'docs/'],
+                ['drwxr-xr-x', 'user', 'user', '4096', 'Jan 01 00:00', 'bin/'],
+            ].forEach(r => {
+                const isDir  = r[0][0] === 'd';
+                const isTxt  = r[5].endsWith('.txt');
+                const isLog  = r[5].endsWith('.log');
+                const nc     = isDir ? 'info' : (isTxt ? 'ok' : (isLog ? 'warn' : 'out'));
+                addLine(`${r[0]}  ${r[1].padEnd(6)} ${r[2].padEnd(6)} ${r[3]}  ${r[4]}  ${r[5]}`, nc);
+            });
+            blank();
+            break;
+
+        /* ── /pwd ── */
+        case '/pwd':
+            addLine('/home/user', 'out');
+            break;
+
+        /* ── /date ── */
+        case '/date':
+            addLine(new Date().toString(), 'out');
+            break;
+
+        /* ── /whoami ── */
+        case '/whoami':
+            blank();
+            addLine('用户名  : user', 'out');
+            addLine('UID     : 1000', 'out');
+            addLine('GID     : 1000', 'out');
+            addLine('所属组  : user sudo', 'out');
+            addLine('主目录  : /home/user', 'out');
+            addLine('Shell   : /bin/bash', 'out');
+            blank();
+            break;
+
+        /* ── /echo ── */
+        case '/echo':
+            addLine(args.length ? args.join(' ') : '', 'out');
+            break;
+
+        /* ── /history ── */
+        case '/history':
+            blank();
+            if (!cmdHistory.length) {
+                addLine('（无命令历史）', 'dim');
+            } else {
+                [...cmdHistory].reverse().forEach((c, i) =>
+                    addLine(`  ${String(i + 1).padStart(3)}  ${c}`, 'out')
+                );
+            }
+            blank();
+            break;
+
+        /* ── /man ── */
+        case '/man': {
+            const manPages = {
+                ls: [
+                    '名称  ls — 列出目录内容',
+                    '用法  ls [选项] [目录]',
+                    '',
+                    '说明  显示指定目录下的文件和子目录列表。',
+                    '',
+                    '常用选项：',
+                    '  -l     以长格式显示（权限/所有者/大小/日期）',
+                    '  -a     显示包括隐藏文件（以 . 开头的文件）',
+                    '  -h     以可读格式显示文件大小（KB、MB）',
+                    '  -la    组合使用 -l 和 -a',
+                    '',
+                    '示例  ls -la /home/user',
+                ],
+                pwd: [
+                    '名称  pwd — 打印当前工作目录',
+                    '用法  pwd',
+                    '',
+                    '说明  Print Working Directory。',
+                    '      显示你当前所处的完整绝对路径。',
+                    '',
+                    '      Linux 文件系统从根目录 / 开始，',
+                    '      路径分隔符为 /，例如：/home/user/documents',
+                ],
+                echo: [
+                    '名称  echo — 输出文本到标准输出',
+                    '用法  echo [文本]',
+                    '',
+                    '说明  将文本原样打印到终端。',
+                    '',
+                    '示例  echo "Hello, World!"',
+                    '      echo $HOME        打印 HOME 环境变量',
+                    '      echo $PATH        打印系统路径变量',
+                ],
+                cat: [
+                    '名称  cat — 连接并显示文件',
+                    '用法  cat [文件名...]',
+                    '',
+                    '说明  Concatenate。读取文件并将内容输出到终端。',
+                    '      可以同时指定多个文件，按顺序输出。',
+                    '',
+                    '示例  cat readme.txt',
+                    '      cat a.txt b.txt > combined.txt    合并两个文件',
+                    '      cat -n file.txt                   显示行号',
+                ],
+                ping: [
+                    '名称  ping — 测试网络连通性',
+                    '用法  ping [选项] 目标地址',
+                    '',
+                    '说明  向目标发送 ICMP Echo 请求包，检测网络延迟与连通性。',
+                    '',
+                    '常用选项：',
+                    '  -c N    只发送 N 次后自动停止',
+                    '  -i N    每隔 N 秒发送一次（默认 1s）',
+                    '',
+                    '返回值：TTL（Time To Live）越小，说明经过的路由跳数越多。',
+                    '',
+                    '示例  ping google.com',
+                    '      ping -c 4 192.168.1.1',
+                ],
+                clear: [
+                    '名称  clear — 清空终端屏幕',
+                    '用法  clear',
+                    '',
+                    '说明  清除当前屏幕上的所有输出内容，但命令历史不受影响。',
+                    '      快捷键：Ctrl + L（在真实终端中效果相同）',
+                ],
+                history: [
+                    '名称  history — 查看命令历史记录',
+                    '用法  history',
+                    '',
+                    '说明  显示本次会话中输入过的所有命令。',
+                    '      在真实 bash 中，历史记录存储于 ~/.bash_history。',
+                    '',
+                    '快捷用法：',
+                    '  ↑ / ↓    在历史命令间切换',
+                    '  !!        重复上一条命令',
+                    '  !n        执行历史中第 n 条命令',
+                ],
+                whoami: [
+                    '名称  whoami — 打印当前有效用户名',
+                    '用法  whoami',
+                    '',
+                    '说明  显示当前登录用户的用户名。',
+                    '',
+                    '相关命令：',
+                    '  id      显示 UID、GID 及所属组的完整信息',
+                    '  who     列出所有当前登录到系统的用户',
+                    '  w       显示登录用户及其正在运行的进程',
+                ],
+                color: [
+                    '名称  color — 切换终端配色主题',
+                    '用法  /color [主题名]',
+                    '',
+                    '可用主题：',
+                    '  green   经典绿色（默认）',
+                    '  amber   琥珀色',
+                    '  white   白色',
+                    '  blue    蓝色',
+                    '  red     红色',
+                    '',
+                    '示例  /color amber',
+                ],
+            };
+
+            if (!args.length) {
+                addLine('用法：/man [命令名]', 'warn');
+                addLine('示例：/man ls', 'dim');
+            } else {
+                const key = args[0].replace(/^\//, '');
+                const page = manPages[key];
+                if (page) {
+                    blank();
+                    addLine('─── MAN PAGE: ' + key + ' ───', 'info');
+                    page.forEach(l => addLine(l || '', l ? 'out' : 'blank'));
+                    addLine('────────────────────────────', 'info');
+                    blank();
+                } else {
+                    addLine(`man: 没有 "${args[0]}" 的手册页`, 'err');
+                    addLine('可查阅：ls pwd echo cat ping clear history whoami color', 'dim');
+                }
+            }
+            break;
+        }
+
+        /* ── /cat ── */
+        case '/cat': {
+            const files = {
+                'readme.txt': [
+                    '欢迎使用 TERM v1.0.0 终端模拟器',
+                    '',
+                    '这是一个用于学习命令行基础知识的交互式环境。',
+                    '所有命令以 / 开头，不会对你的真实系统产生任何影响。',
+                    '',
+                    '提示：输入 /help 查看完整命令列表。',
+                ],
+                'notes.txt': [
+                    '命令行学习笔记',
+                    '==============',
+                    '1. 文件系统是树状结构，根节点是 /（Unix/Linux）或 C:\\（Windows）',
+                    '2. 绝对路径从根目录 / 开始；相对路径从当前目录开始',
+                    '3. .  表示当前目录   ..  表示上级目录',
+                    '4. Unix/Linux 中隐藏文件以 . 开头',
+                    '5. 管道符 | 将前一命令的输出传入下一命令',
+                    '6. > 重定向输出到文件（覆盖）；>> 追加到文件',
+                    '7. & 可让命令在后台运行；Ctrl+C 强制终止前台进程',
+                ],
+                'system.log': [
+                    '[2025-01-01 00:00:01] System boot complete',
+                    '[2025-01-01 00:00:04] Network interface eth0: UP',
+                    '[2025-01-01 00:00:07] sshd[312]: Started OpenSSH server',
+                    '[2025-01-01 00:02:19] user[1000]: Login from 127.0.0.1',
+                    '[2025-01-01 00:05:33] cron[441]: Executed backup.sh',
+                    '[2025-01-01 01:00:00] cron[441]: Executed log-rotate.sh',
+                ],
+            };
+
+            if (!args.length) {
+                addLine('用法：/cat [文件名]', 'warn');
+                addLine('可用文件：readme.txt  notes.txt  system.log', 'dim');
+            } else {
+                const content = files[args[0]];
+                if (content) {
+                    blank();
+                    content.forEach(l => addLine(l, 'out'));
+                    blank();
+                } else {
+                    addLine(`cat: ${args[0]}: No such file or directory`, 'err');
+                    addLine('可用文件：readme.txt  notes.txt  system.log', 'dim');
+                }
+            }
+            break;
+        }
+
+        /* ── /ping ── */
+        case '/ping': {
+            if (!args.length) {
+                addLine('用法：/ping [地址]', 'warn');
+                break;
+            }
+            const target = args[0];
+            blank();
+            addLine(`PING ${target}: 56 data bytes`, 'out');
+            pingActive = true;
+            inp.disabled = true;
+            let sent = 0;
+            const rtts = [];
+            const timer = setInterval(() => {
+                if (sent >= 4) {
+                    clearInterval(timer);
+                    const avg = (rtts.reduce((a, b) => a + b, 0) / rtts.length).toFixed(1);
+                    blank();
+                    addLine(`--- ${target} ping statistics ---`, 'info');
+                    addLine(`4 packets transmitted, 4 received, 0% packet loss`, 'ok');
+                    addLine(`rtt min/avg/max = ${Math.min(...rtts).toFixed(1)}/${avg}/${Math.max(...rtts).toFixed(1)} ms`, 'out');
+                    blank();
+                    pingActive = false;
+                    inp.disabled = false;
+                    inp.focus();
+                    return;
+                }
+                const rtt = (8 + Math.random() * 45).toFixed(2);
+                rtts.push(parseFloat(rtt));
+                const ttl = Math.floor(48 + Math.random() * 16);
+                addLine(`来自 ${target} 的回复：字节=56  时间=${rtt}ms  TTL=${ttl}`, 'out');
+                sent++;
+            }, 700);
+            break;
+        }
+
+        /* ── /sysinfo ── */
+        case '/sysinfo':
+            blank();
+            addLine('─── System Information ───', 'info');
+            addLine('OS       : TERM-OS 1.0 (Browser Sandbox)', 'out');
+            addLine('Kernel   : JS Engine / ' + navigator.userAgent.split('/')[0], 'out');
+            addLine('CPU 核心 : ' + (navigator.hardwareConcurrency || 'N/A'), 'out');
+            addLine('语言     : ' + navigator.language, 'out');
+            addLine('时区     : ' + Intl.DateTimeFormat().resolvedOptions().timeZone, 'out');
+            addLine('运行时长 : ' + fmtUptime(performance.now()), 'out');
+            addLine('当前时间 : ' + new Date().toLocaleString('zh-CN'), 'out');
+            addLine('─────────────────────────', 'info');
+            blank();
+            break;
+
+        /* ── /color ── */
+        case '/color': {
+            const themes = {
+                green: { fg: '#00ff41', bg: '#0c0c0c', caret: '#00ff41' },
+                amber: { fg: '#ffb000', bg: '#0a0800', caret: '#ffb000' },
+                white: { fg: '#e0e0e0', bg: '#111111', caret: '#e0e0e0' },
+                blue:  { fg: '#4af0ff', bg: '#030e12', caret: '#4af0ff' },
+                red:   { fg: '#ff5566', bg: '#0d0306', caret: '#ff5566' },
+            };
+            if (!args.length) {
+                addLine('用法：/color [主题名]', 'warn');
+                addLine('可用主题：green / amber / white / blue / red', 'dim');
+                break;
+            }
+            const t = themes[args[0]];
+            if (!t) {
+                addLine('未知主题：' + args[0], 'err');
+                addLine('可用主题：green / amber / white / blue / red', 'dim');
+            } else {
+                document.body.style.color = t.fg;
+                document.body.style.background = t.bg;
+                inp.style.color = t.fg;
+                inp.style.caretColor = t.caret;
+                document.getElementById('prompt').style.color = t.fg;
+                addLine('配色已切换为：' + args[0], 'ok');
+            }
+            break;
+        }
+
+        /* ── /matrix ── */
+        case '/matrix':
+            startMatrix();
+            break;
+
+        /* ── 未知命令 ── */
+        default:
+            addLine(`bash: ${cmd}: command not found`, 'err');
+            addLine('输入 /help 查看可用命令。', 'dim');
+            break;
+    }
+}
+
+/* ──────────────────────────────────────────────
+   辅助函数
+   ────────────────────────────────────────────── */
+function fmtUptime(ms) {
+    const s = Math.floor(ms / 1000);
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
+}
+
+/* Matrix 雨效果 */
+let matrixRaf = null;
+function startMatrix() {
+    addLine('[Matrix — 点击屏幕任意位置退出]', 'warn');
+    canvas.style.display = 'block';
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const ctx  = canvas.getContext('2d');
+    const cols = Math.floor(canvas.width / 15);
+    const drops = Array(cols).fill(1);
+    const CHARS = 'アイウエオカキクケコ0123456789ABCDEF<>/\\|{}';
+
+    function draw() {
+        ctx.fillStyle = 'rgba(0,0,0,0.05)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#00ff41';
+        ctx.font = '13px monospace';
+        drops.forEach((y, i) => {
+            ctx.fillText(CHARS[Math.floor(Math.random() * CHARS.length)], i * 15, y * 15);
+            if (y * 15 > canvas.height && Math.random() > 0.975) drops[i] = 0;
+            drops[i]++;
+        });
+        matrixRaf = requestAnimationFrame(draw);
+    }
+    draw();
+
+    canvas.addEventListener('click', stopMatrix, { once: true });
+}
+
+function stopMatrix() {
+    if (matrixRaf) cancelAnimationFrame(matrixRaf);
+    canvas.style.display = 'none';
+    addLine('[已退出 Matrix 效果]', 'dim');
+    inp.focus();
+}
+</script>
+</body>
+</html>
